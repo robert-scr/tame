@@ -1,0 +1,47 @@
+{
+  "timestamp": "2026-03-30T21:13:48.271706+00:00",
+  "workspace_root": "C:\\Users\\robsc\\Home\\Dev\\molfusion2",
+  "output_dir": "C:\\Users\\robsc\\Home\\Dev\\molfusion2\\benchmarking\\results\\hpo\\tame_fusion_bace",
+  "storage": "sqlite:///C:/Users/robsc/Home/Dev/molfusion2/benchmarking/results/hpo/tame_fusion_bace/optuna_study.db",
+  "objective": "maximize val_roc_auc",
+  "pretrain_alignment_policy": "strict_architecture_match",
+  "pretrain_arch_catalog_source": "frozen_run_config",
+  "pretrain_arch_catalog": [
+    "h128_L3_K3_pool-set2set",
+    "h128_L3_K3_pool-sum",
+    "h256_L3_K4_pool-set2set",
+    "h64_L2_K3_pool-sum"
+  ],
+  "discovered_pretrain_arch_catalog": [
+    "h128_L3_K3_pool-set2set",
+    "h128_L3_K3_pool-sum",
+    "h256_L3_K4_pool-set2set",
+    "h64_L2_K3_pool-sum"
+  ],
+  "args": {
+    "study_name": "tame_fusion_bace",
+    "storage": null,
+    "output_dir": "benchmarking/results/hpo/tame_fusion_bace",
+    "n_trials": 50,
+    "timeout": 0,
+    "n_jobs": 1,
+    "sampler": "tpe",
+    "pruner": "median",
+    "pruner_startup_trials": 20,
+    "pruner_warmup_steps": 1,
+    "optuna_seed": 12345,
+    "device": "cuda",
+    "trial_seeds": "11",
+    "num_epochs": 100,
+    "search_arch": false,
+    "pretrain_stage": "stage1_node",
+    "pretrain_arch_policy": "strict",
+    "embeddings_npz": "cache/cot_embeddings/binding_fast_text_embeddings_compact.npz",
+    "fail_fast": false,
+    "run_final_eval": true,
+    "final_eval_only": true,
+    "final_top_k": 5,
+    "final_eval_seeds": "11,22,33,44,55",
+    "final_num_epochs": 140
+  }
+}

@@ -1,0 +1,32 @@
+[project]
+name = "molfusion2"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.10,<3.13"
+dependencies = [
+    "azure-identity>=1.25.2",
+    "deepchem>=2.8.0",
+    "mordred>=1.2.0",
+    "numpy>=1.26,<2.0",
+    "openai>=2.24.0",
+    "optuna>=4.0.0",
+    "pandas>=2.2,<3.0",
+    "polaris-lib>=0.13.0",
+    "rdkit>=2025.9.5",
+    "scipy>=1.11",
+    "torch>=2.5.1",
+    "zarr>=2.18.3",
+]
+
+[[tool.uv.index]]
+name = "pytorch-cu124"
+url = "https://download.pytorch.org/whl/cu124"
+explicit = true
+
+[tool.uv.sources]
+torch = { index = "pytorch-cu124" }
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["*"]

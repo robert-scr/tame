@@ -1,0 +1,109 @@
+# Literature notes
+ref_literature/
+
+# Internal docs
+docs/
+
+# AI assistant config / context
+CLAUDE.md
+.claude/
+.github/agents/
+.cursor/
+.cursorrules
+.aider*
+AGENTS.md
+GEMINI.md
+
+# Cache until solution with LFS is found
+cache/pubchem_1MM.zarr.tar.xz
+cache/pubchem_1MM.zarr/
+cache/chemeleon_pretraining
+cache/pretrained_checkpoints
+# Python
+*.py[cod]
+*$py.class
+*.so
+__pycache__/
+*.pyc
+.Python
+
+# Virtual Environments
+venv/
+env/
+ENV/
+.venv/
+
+# Jupyter Notebook
+.ipynb_checkpoints/
+*.ipynb_checkpoints
+
+# Environment Variables
+.env
+.env.local
+
+# IDEs
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# Distribution / Packaging
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# Testing
+.pytest_cache/
+.coverage
+htmlcov/
+.tox/
+
+# Data and Models (Machine Learning)
+*.h5
+*.pkl
+*.joblib
+*.model
+*.ckpt
+data/raw/
+data/processed/
+models/saved/
+*.pth
+*.weights
+
+# Logs
+*.log
+logs/
+
+# Temporary files
+*.tmp
+*.temp
+temp/
+tmp/
+
+# Windows
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+
+# Documentation builds
+docs/_build/
+site/

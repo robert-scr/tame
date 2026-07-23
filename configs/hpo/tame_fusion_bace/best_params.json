@@ -1,0 +1,45 @@
+{
+  "study_name": "tame_fusion_bace",
+  "best_trial_number": 84,
+  "best_value_val_roc_auc": 0.7560412287712097,
+  "best_params": {
+    "fusion_dim_heads_pair_bace_v1": "64x8",
+    "moe_hidden_dim": 128,
+    "head_hidden_dim": 16,
+    "fusion_dropout": 0.1,
+    "projection_dropout": 0.45,
+    "router_dropout": 0.15000000000000002,
+    "head_dropout": 0.35,
+    "learning_rate": 0.000307216519715071,
+    "weight_decay": 0.021300916297924705,
+    "batch_size": 32,
+    "patience": 16,
+    "gate_balance_weight": 0.0010072166732261446,
+    "desc_modality_dropout": 0.35,
+    "descriptor_winsorize_lower_q": 0.015,
+    "descriptor_winsorize_upper_q": 0.98,
+    "fusion_dim": 64,
+    "fusion_n_heads": 8,
+    "fusion": "cross_mha",
+    "hidden_channels": 128,
+    "K": 3,
+    "num_layers": 3,
+    "pool": "set2set",
+    "set2set_processing_steps": 6
+  },
+  "best_user_attrs": {
+    "mean_best_threshold": 0.47999998927116394,
+    "mean_test_accuracy": 0.7565789222717285,
+    "mean_test_f1": 0.7757575511932373,
+    "mean_test_roc_auc": 0.8333333134651184,
+    "mean_val_accuracy": 0.7350993156433105,
+    "mean_val_f1": 0.7802197933197021,
+    "mean_val_roc_auc": 0.7560412287712097,
+    "trial_seeds": [
+      11
+    ]
+  },
+  "trial_count": 129,
+  "storage": "sqlite:///C:/Users/robsc/Home/Dev/molfusion2/benchmarking/results/hpo/tame_fusion_bace/optuna_study.db",
+  "updated_at": "2026-03-30T21:14:02.335383+00:00"
+}
