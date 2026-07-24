@@ -275,10 +275,67 @@ def _pyg_predict(model, loader, device, n):
     return probs
 
 
-def run_pyg_cheb(train_dc, valid_dc, test_dc, seeds, args):
+def train_pyg_seed(train_g, val_g, test_g, y_val, in_channels, args, seed, device):
+    """Train one random-init PyG ChebConv (early-stopped on val); return (test_probs, val_probs, epoch).
+
+    Per-molecule probabilities are aligned to the order of val_g / test_g. Shared by the benchmark
+    (run_pyg_cheb) and the modality-complementarity analysis so both use the identical training path.
+    """
     import torch
     import torch.nn as nn
     from torch_geometric.loader import DataLoader
+
+    set_seed(seed)
+    model = _make_pyg_model(in_channels, args.hidden, args.K, args.num_layers,
+                            args.pool, args.dropout).to(device)
+    optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=args.wd)
+    criterion = nn.BCEWithLogitsLoss()
+
+    g = torch.Generator().manual_seed(int(seed))
+    train_loader = DataLoader(train_g, batch_size=args.batch_size, shuffle=True, generator=g)
+    val_loader = DataLoader(val_g, batch_size=128, shuffle=False)
+    test_loader = DataLoader(test_g, batch_size=128, shuffle=False)
+
+    best_metric = float("-inf") if args.es_metric == "val_auc" else float("inf")
+    best_state = copy.deepcopy(model.state_dict())
+    best_epoch, no_improve = 0, 0
+
+    for epoch in range(1, args.max_epochs + 1):
+        model.train()
+        for batch in train_loader:
+            batch = batch.to(device)
+            optimizer.zero_grad(set_to_none=True)
+            out = model(batch.x, batch.edge_index, batch.edge_weight, batch.batch)
+            loss = criterion(out, batch.y.view(-1))
+            loss.backward()
+            optimizer.step()
+
+        val_probs = _pyg_predict(model, val_loader, device, len(val_g))
+        val_roc, _, _ = _classification_metrics(y_val, val_probs)
+        obs = np.isfinite(y_val) & np.isfinite(val_probs)
+        val_loss = float(nn.functional.binary_cross_entropy(
+            torch.from_numpy(val_probs[obs].clip(1e-7, 1 - 1e-7)),
+            torch.from_numpy(y_val[obs]),
+        )) if obs.any() else float("inf")
+
+        metric = val_roc if args.es_metric == "val_auc" else val_loss
+        is_better = (metric > best_metric) if args.es_metric == "val_auc" else (metric < best_metric)
+        if np.isfinite(metric) and is_better:
+            best_metric, best_epoch, no_improve = metric, epoch, 0
+            best_state = copy.deepcopy(model.state_dict())
+        else:
+            no_improve += 1
+            if no_improve >= args.patience:
+                break
+
+    model.load_state_dict(best_state)
+    test_probs = _pyg_predict(model, test_loader, device, len(test_g))
+    val_probs = _pyg_predict(model, val_loader, device, len(val_g))
+    return test_probs, val_probs, best_epoch
+
+
+def run_pyg_cheb(train_dc, valid_dc, test_dc, seeds, args):
+    import torch
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"\n=== PyG ChebConv (random init) d{args.hidden} K{args.K} L{args.num_layers} "
@@ -292,52 +349,8 @@ def run_pyg_cheb(train_dc, valid_dc, test_dc, seeds, args):
 
     rows = []
     for seed in seeds:
-        set_seed(seed)
-        model = _make_pyg_model(in_channels, args.hidden, args.K, args.num_layers,
-                                args.pool, args.dropout).to(device)
-        optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=args.wd)
-        criterion = nn.BCEWithLogitsLoss()
-
-        g = torch.Generator().manual_seed(int(seed))
-        train_loader = DataLoader(train_g, batch_size=args.batch_size, shuffle=True, generator=g)
-        val_loader = DataLoader(val_g, batch_size=128, shuffle=False)
-        test_loader = DataLoader(test_g, batch_size=128, shuffle=False)
-
-        best_metric = float("-inf") if args.es_metric == "val_auc" else float("inf")
-        best_state = copy.deepcopy(model.state_dict())
-        best_epoch, no_improve = 0, 0
-
-        for epoch in range(1, args.max_epochs + 1):
-            model.train()
-            for batch in train_loader:
-                batch = batch.to(device)
-                optimizer.zero_grad(set_to_none=True)
-                out = model(batch.x, batch.edge_index, batch.edge_weight, batch.batch)
-                loss = criterion(out, batch.y.view(-1))
-                loss.backward()
-                optimizer.step()
-
-            val_probs = _pyg_predict(model, val_loader, device, len(val_g))
-            val_roc, _, _ = _classification_metrics(y_val, val_probs)
-            obs = np.isfinite(y_val) & np.isfinite(val_probs)
-            val_loss = float(nn.functional.binary_cross_entropy(
-                torch.from_numpy(val_probs[obs].clip(1e-7, 1 - 1e-7)),
-                torch.from_numpy(y_val[obs]),
-            )) if obs.any() else float("inf")
-
-            metric = val_roc if args.es_metric == "val_auc" else val_loss
-            is_better = (metric > best_metric) if args.es_metric == "val_auc" else (metric < best_metric)
-            if np.isfinite(metric) and is_better:
-                best_metric, best_epoch, no_improve = metric, epoch, 0
-                best_state = copy.deepcopy(model.state_dict())
-            else:
-                no_improve += 1
-                if no_improve >= args.patience:
-                    break
-
-        model.load_state_dict(best_state)
-        test_probs = _pyg_predict(model, test_loader, device, len(test_g))
-        val_probs = _pyg_predict(model, val_loader, device, len(val_g))
+        test_probs, val_probs, best_epoch = train_pyg_seed(
+            train_g, val_g, test_g, y_val, in_channels, args, seed, device)
         roc, pr, f1 = _classification_metrics(y_test, test_probs)
         val_roc, _, _ = _classification_metrics(y_val, val_probs)
         print(f"  seed {seed}: ROC-AUC={roc:.4f} PR-AUC={pr:.4f} Macro-F1={f1:.4f} (ep {best_epoch})")

@@ -1,0 +1,48 @@
+{
+  "n_test": 152,
+  "n_seeds_averaged": 10,
+  "pairs": [
+    {
+      "structural": "PyG-ChebConv (graph)",
+      "descriptor": "RF-RDKit (desc)",
+      "auc_structural": 0.8139492753623188,
+      "auc_descriptor": 0.8005434782608697,
+      "auc_ensemble_mean": 0.8434782608695652,
+      "ensemble_gain_vs_structural": 0.029528985507246475,
+      "acc_structural": 0.6973684210526315,
+      "acc_descriptor": 0.6578947368421053,
+      "acc_ensemble_mean": 0.6842105263157895,
+      "prob_pearson": 0.6434068083763123,
+      "prob_spearman": 0.6422576698856607,
+      "signed_error_pearson": 0.8852203488349915,
+      "error_indicator_phi": 0.46073845813001674,
+      "n_structural_errors": 46,
+      "desc_rescue_rate_on_errors": 0.32608695652173914,
+      "n_confident_structural_errors": 23,
+      "desc_rescue_rate_on_confident_errors": 0.17391304347826086,
+      "disagreement_rate": 0.23684210526315788,
+      "oracle_at_least_one_correct": 0.7960526315789473
+    },
+    {
+      "structural": "RF-ECFP (structural proxy)",
+      "descriptor": "RF-RDKit (desc)",
+      "auc_structural": 0.867572463768116,
+      "auc_descriptor": 0.8005434782608697,
+      "auc_ensemble_mean": 0.8485507246376811,
+      "ensemble_gain_vs_structural": -0.019021739130434923,
+      "acc_structural": 0.7302631578947368,
+      "acc_descriptor": 0.6578947368421053,
+      "acc_ensemble_mean": 0.6973684210526315,
+      "prob_pearson": 0.8403451442718506,
+      "prob_spearman": 0.8221837408197944,
+      "signed_error_pearson": 0.9330215454101562,
+      "error_indicator_phi": 0.6553347885420406,
+      "n_structural_errors": 41,
+      "desc_rescue_rate_on_errors": 0.14634146341463414,
+      "n_confident_structural_errors": 21,
+      "desc_rescue_rate_on_confident_errors": 0.0,
+      "disagreement_rate": 0.1513157894736842,
+      "oracle_at_least_one_correct": 0.7697368421052632
+    }
+  ]
+}
