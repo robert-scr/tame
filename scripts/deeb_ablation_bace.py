@@ -28,6 +28,7 @@ Example:
 import os
 import sys
 import csv
+import json
 import argparse
 
 import numpy as np
@@ -43,6 +44,7 @@ import baselines_bace as bb                 # noqa: E402  (identical split + des
 import bace_preliminary_results as bp       # noqa: E402  (fit_full_model, gate stats, CSV schema)
 from models.tame_predictor import TAMEPredictorConfig  # noqa: E402
 from utils.embedding_cache import EfficientEmbeddingCache  # noqa: E402
+from utils.molecular_graph import smiles_to_graph  # noqa: E402
 
 # gate_mode -> gate regularisation preset. target is moot when balance_weight=0 (kept for clarity).
 GATE_PRESETS = {
@@ -145,7 +147,7 @@ def main():
                 np.concatenate([rk_te, ecfp[2]], axis=1))
 
     # ---- Optional pretrained encoder ----
-    enc_state = None
+    enc_state, ckpt = None, None
     if args.ckpt_dir:
         ckpt = os.path.join(args.ckpt_dir,
                             f"chebnet_pt_d{args.hidden}_K{args.K}_L{args.num_layers}_e{args.ckpt_epoch_tag}.pt")
@@ -160,7 +162,46 @@ def main():
     params = {"batch_size": args.batch_size, "lr": args.lr, "weight_decay": args.wd,
               "encoder_lr_mult": args.encoder_lr_mult}
 
+    # ---- Reference ChebNet graph-only arm (matched checkpoint + recipe) ----
+    # Only meaningful with a real checkpoint; run_graph_only reloads it, so skip when absent.
+    run_ref = enc_state is not None
+    if run_ref:
+        graph_bb = {"hidden": args.hidden, "K": args.K, "L": args.num_layers, "pool": args.pool,
+                    "set2set_n_iter": args.set2set_n_iter,
+                    "ckpt_name": os.path.basename(ckpt), "ckpt_path": ckpt}
+        graph_recipe = bp.recipe_of(None, lr=args.lr, wd=args.wd, batch_size=args.batch_size,
+                                    encoder_lr_mult=args.encoder_lr_mult, label_smoothing=args.label_smoothing)
+
+        def _graphs(sm):
+            out = []
+            for s in sm:
+                try:
+                    out.append(smiles_to_graph(s))
+                except Exception:
+                    out.append(None)
+            return out
+        ref_graphs = (_graphs(train_smiles), _graphs(val_smiles), _graphs(test_smiles))
+        ref_ys = (y_train, y_val, y_test)
+
     rows = []
+    arm_preds = {}  # arm label -> list of per-seed test-prob arrays (seed-averaged at the end)
+
+    # ---- (0) ChebNet graph-only reference (the anchor for "recovered ChebNet's level") ----
+    if run_ref:
+        ref_label = "ChebNet (graph-only, pretrained)"
+        print(f"\n=== {ref_label}  (recipe: {graph_recipe}) ===")
+        for seed in seeds:
+            test_probs, val_probs, epoch = bp.run_graph_only(
+                graph_bb, graph_recipe, ref_graphs, ref_ys, device,
+                max_epochs=args.max_epochs, patience=args.patience, es_metric=args.es_metric, seed=seed)
+            roc, pr, f1 = bp._classification_metrics(y_test, test_probs)
+            val_roc, _, _ = bp._classification_metrics(y_val, val_probs)
+            print(f"  seed {seed}: ROC-AUC={roc:.4f} PR-AUC={pr:.4f} F1={f1:.4f} (ep {epoch})")
+            row = bp._blank_row(ref_label, seed)
+            row.update({"Test_ROC_AUC": roc, "Test_PR_AUC": pr, "Test_Macro_F1": f1,
+                        "Val_ROC_AUC": val_roc, "Stop_Epoch": epoch})
+            rows.append(row)
+            arm_preds.setdefault(ref_label, []).append(test_probs)
     for feat_kind in args.desc_features:
         d_tr, d_va, d_te = desc_for(feat_kind)
         data = {
@@ -190,6 +231,7 @@ def main():
                             "Gate_Entropy_Mean": ent, "Gate_Min_Mean": gmin,
                             "Gate_Graph": gm[0], "Gate_Text": gm[1], "Gate_Desc": gm[2]})
                 rows.append(row)
+                arm_preds.setdefault(arm, []).append(np.asarray(test_probs, dtype=np.float64))
 
     csv_path = os.path.join(args.out_dir, "deeb_ablation_bace.csv")
     with open(csv_path, "w", newline="") as f:
@@ -197,6 +239,39 @@ def main():
         w.writeheader()
         w.writerows(rows)
     print(f"\nSaved {len(rows)} rows to {csv_path}")
+
+    # ---- Per-molecule seed-averaged test predictions (for tail-rescue / complementarity analysis) ----
+    arms_order = list(arm_preds.keys())
+    avg = {a: np.mean(np.stack(v), axis=0) for a, v in arm_preds.items()}
+    pred_path = os.path.join(args.out_dir, "deeb_ablation_predictions.csv")
+    with open(pred_path, "w", newline="") as f:
+        w = csv.writer(f)
+        w.writerow(["smiles", "y"] + [f"p[{a}]" for a in arms_order])
+        for i, smi in enumerate(test_smiles):
+            w.writerow([smi, int(y_test[i])] + [f"{avg[a][i]:.6f}" for a in arms_order])
+    print(f"Saved per-molecule predictions to {pred_path}")
+
+    # ---- Run metadata (arch / checkpoint / recipe) so results are self-describing ----
+    meta = {
+        "splitter": args.splitter,
+        "split_sizes": {"train": len(train_smiles), "val": len(val_smiles), "test": len(test_smiles)},
+        "seeds": [int(s) for s in seeds],
+        "es_metric": args.es_metric, "max_epochs": args.max_epochs, "patience": args.patience,
+        "arch": {"hidden": args.hidden, "K": args.K, "num_layers": args.num_layers,
+                 "pool": args.pool, "set2set_n_iter": args.set2set_n_iter},
+        "checkpoint": {"dir": args.ckpt_dir, "epoch_tag": args.ckpt_epoch_tag,
+                       "path": ckpt, "loaded_pretrained": bool(run_ref)},
+        "recipe": {"lr": args.lr, "weight_decay": args.wd, "batch_size": args.batch_size,
+                   "encoder_lr_mult": args.encoder_lr_mult, "label_smoothing": args.label_smoothing},
+        "gate_presets": {m: GATE_PRESETS[m] for m in args.gate_modes},
+        "desc_features": args.desc_features,
+        "descriptor_dims": {"rdkit": int(rk_tr.shape[1]),
+                            "rdkit_ecfp": int(rk_tr.shape[1] + np.asarray(train_dc.X).shape[1])},
+        "reference_arm": ("ChebNet (graph-only, pretrained)" if run_ref else None),
+    }
+    with open(os.path.join(args.out_dir, "deeb_ablation_meta.json"), "w") as f:
+        json.dump(meta, f, indent=2)
+    print(f"Saved metadata to {os.path.join(args.out_dir, 'deeb_ablation_meta.json')}")
 
     # ---- Per-arm summary ----
     print("\n=== Summary (Test ROC-AUC) ===")
