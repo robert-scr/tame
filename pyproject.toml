@@ -16,6 +16,7 @@ dependencies = [
     "rdkit>=2025.9.5",
     "scipy>=1.11",
     "torch>=2.5.1",
+    "torch-geometric>=2.8.0.post1",
     "zarr>=2.18.3",
 ]
 

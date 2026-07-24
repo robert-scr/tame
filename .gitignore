@@ -19,6 +19,8 @@ cache/pubchem_1MM.zarr.tar.xz
 cache/pubchem_1MM.zarr/
 cache/chemeleon_pretraining
 cache/pretrained_checkpoints
+# DeepChem download/split cache (re-downloadable)
+cache/deepchem_data/
 # Python
 *.py[cod]
 *$py.class
