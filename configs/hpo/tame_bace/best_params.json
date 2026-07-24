@@ -1,0 +1,35 @@
+{
+    "value": 0.7594171997157072,
+    "params": {
+        "K": 5,
+        "num_layers": 3,
+        "hidden_channels": 64,
+        "pool_type": "sum",
+        "encoder_lr_mult": 0.8455638025796268,
+        "proj_dim": 256,
+        "projection_dropout": 0.5131566401242362,
+        "router_dropout": 0.5916622829567769,
+        "head_hidden_dim": 32,
+        "head_dropout": 0.4709354418111099,
+        "gate_balance_weight": 0.0011742828350932918,
+        "gate_entropy_weight": 0.06088336155806952,
+        "label_smoothing": 0.07558899409945649,
+        "desc_modality_dropout": 0.35391664603863615,
+        "gate_target_graph": 0.6405824155633252,
+        "gate_target_text": 0.017715783877339485,
+        "lr": 8.164469621022018e-05,
+        "weight_decay": 0.0012815908505143133,
+        "batch_size": 64
+    },
+    "user_attrs": {
+        "seed": 11,
+        "splitter": "scaffold",
+        "test_auc": 0.8230072463768117,
+        "test_f1": 0.7453416149068323,
+        "test_pr_auc": 0.8640322896229887,
+        "threshold": 0.18,
+        "val_auc": 0.7594171997157072,
+        "val_f1": 0.7861271676300579,
+        "val_pr_auc": 0.734600263037681
+    }
+}

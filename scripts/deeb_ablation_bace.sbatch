@@ -26,7 +26,7 @@ OUT_DIR="${OUT_DIR:-/home/rschiller/Code/TAME-MPP/Rechnungen/deeb_ablation/e02}"
 # Flat-TAME HPO best-params JSON. Drives arch (d64_K5_L3_sum), recipe AND the tuned graph-heavy
 # gate config (target=0.64, balance=0.0012, entropy=0.061) -- so the checkpoint chebnet_pt_d64_K5_L3_e25.pt
 # must exist in CKPT_DIR. Point this at your tame_hpo_v3 best-params file.
-TAME_PARAMS="${TAME_PARAMS:-/home/rschiller/Code/TAME-MPP/Rechnungen/hpo/tame_bace_best_params.json}"
+TAME_PARAMS="${TAME_PARAMS:-$REPO_DIR/configs/hpo/tame_bace/best_params.json}"
 N_SEEDS="${N_SEEDS:-20}"
 mkdir -p "$OUT_DIR" logs
 
