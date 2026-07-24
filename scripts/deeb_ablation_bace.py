@@ -29,6 +29,7 @@ import os
 import sys
 import csv
 import json
+import dataclasses
 import argparse
 
 import numpy as np
@@ -46,11 +47,52 @@ from models.tame_predictor import TAMEPredictorConfig  # noqa: E402
 from utils.embedding_cache import EfficientEmbeddingCache  # noqa: E402
 from utils.molecular_graph import smiles_to_graph  # noqa: E402
 
-# gate_mode -> gate regularisation preset. target is moot when balance_weight=0 (kept for clarity).
+GATE_MODES = ["anchored", "balance_off", "free", "forced"]
+# Static presets for the no-params path only. gate_target is inert when balance_weight=0.
 GATE_PRESETS = {
     "free":   dict(gate_entropy_weight=0.0,  gate_balance_weight=0.0,  gate_target=(0.8, 0.1, 0.1)),
     "forced": dict(gate_entropy_weight=0.05, gate_balance_weight=0.01, gate_target=(0.34, 0.33, 0.33)),
 }
+
+
+def load_params_json(path):
+    """Load an HPO best-params dict (accepts {'params':...} / {'best_params':...} / flat)."""
+    with open(path) as f:
+        obj = json.load(f)
+    for k in ("params", "best_params"):
+        if isinstance(obj.get(k), dict):
+            return obj[k]
+    return obj
+
+
+def resolve_gate(mode, params):
+    """Return {gate_target, gate_balance_weight, gate_entropy_weight} for a gate mode.
+
+    With --tame_params_json the tuned graph-heavy target + balance weight come straight from the JSON:
+      anchored     -- as HPO-tuned (target(0.64) + active balance + mild entropy): prevents desc collapse
+      balance_off  -- identical but gate_balance_weight=0: demonstrates the collapse the target prevents
+      free         -- balance and entropy both off (fully unconstrained)
+      forced       -- balanced target + entropy (uniform-mixing baseline)
+    """
+    if params is not None:
+        gg = float(params["gate_target_graph"])
+        gt = float(params["gate_target_text"])
+        tuned = dict(gate_target=(gg, gt, max(1.0 - gg - gt, 0.0)),
+                     gate_balance_weight=float(params.get("gate_balance_weight", 0.0)),
+                     gate_entropy_weight=float(params.get("gate_entropy_weight", 0.0)))
+        if mode == "anchored":
+            return tuned
+        if mode == "balance_off":
+            return {**tuned, "gate_balance_weight": 0.0}
+        if mode == "free":
+            return {**tuned, "gate_balance_weight": 0.0, "gate_entropy_weight": 0.0}
+        if mode == "forced":
+            return dict(gate_target=(0.34, 0.33, 0.33), gate_balance_weight=0.01, gate_entropy_weight=0.05)
+    if mode not in GATE_PRESETS:
+        raise SystemExit(f"gate_mode '{mode}' requires --tame_params_json")
+    g = GATE_PRESETS[mode]
+    return dict(gate_target=tuple(g["gate_target"]),
+                gate_balance_weight=g["gate_balance_weight"], gate_entropy_weight=g["gate_entropy_weight"])
 
 
 def load_text(split_smiles):
@@ -60,8 +102,13 @@ def load_text(split_smiles):
     return [np.asarray(cache.get_batch(s), dtype=np.float32) for s in split_smiles]
 
 
-def build_config(args, gate_mode, desc_dim, text_dim):
-    g = GATE_PRESETS[gate_mode]
+def build_config(args, gate_mode, desc_dim, text_dim, params):
+    """TAME config for one arm. With params: reuse the tested build_tame_config, then override the
+    gate knobs per gate_mode. Without params: the CLI/generic path (forced/free only)."""
+    gate = resolve_gate(gate_mode, params)
+    if params is not None:
+        cfg = bp.build_tame_config(params, int(text_dim), int(desc_dim))
+        return dataclasses.replace(cfg, **gate)
     return TAMEPredictorConfig(
         task="classification", num_tasks=1,
         hidden_channels=args.hidden, K=args.K, num_layers=args.num_layers,
@@ -70,8 +117,8 @@ def build_config(args, gate_mode, desc_dim, text_dim):
         fusion_hidden_dim=args.proj_dim,
         projection_dropout=args.projection_dropout, router_dropout=args.router_dropout,
         head_hidden_dim=args.head_hidden_dim, head_dropout=args.head_dropout,
-        gate_balance_weight=g["gate_balance_weight"], gate_entropy_weight=g["gate_entropy_weight"],
-        gate_target=g["gate_target"], desc_modality_dropout=args.desc_modality_dropout,
+        gate_balance_weight=gate["gate_balance_weight"], gate_entropy_weight=gate["gate_entropy_weight"],
+        gate_target=gate["gate_target"], desc_modality_dropout=args.desc_modality_dropout,
         label_smoothing=args.label_smoothing,
         descriptor_standardize=True,
         descriptor_winsorize_lower_q=0.01, descriptor_winsorize_upper_q=0.99,
@@ -82,14 +129,17 @@ def main():
     parser = argparse.ArgumentParser(description="DEEB ablation: gate mode x descriptor features on BACE")
     parser.add_argument("--out_dir", type=str, default="benchmarking/results")
     parser.add_argument("--splitter", type=str, choices=["random", "scaffold"], default="scaffold")
-    parser.add_argument("--gate_modes", nargs="+", choices=list(GATE_PRESETS), default=["forced", "free"])
+    parser.add_argument("--gate_modes", nargs="+", choices=GATE_MODES, default=None,
+                        help="Default: [anchored, balance_off] with --tame_params_json, else [forced, free].")
     parser.add_argument("--desc_features", nargs="+", choices=["rdkit", "rdkit_ecfp"],
                         default=["rdkit", "rdkit_ecfp"])
     parser.add_argument("--n_seeds", type=int, default=20)
+    # HPO best-params JSON (flat TAME). Drives arch + recipe + tuned gate config; anchored/balance_off need it.
+    parser.add_argument("--tame_params_json", type=str, default=None)
     # Pretrained ChebNet checkpoint (optional; trains from scratch if absent).
     parser.add_argument("--ckpt_dir", type=str, default=None)
     parser.add_argument("--ckpt_epoch_tag", type=int, default=25)
-    # TAME architecture / recipe (defaults mirror the generic ChebNet recipe; override to match a checkpoint).
+    # TAME architecture / recipe (used only WITHOUT --tame_params_json; else the JSON wins).
     parser.add_argument("--hidden", type=int, default=64)
     parser.add_argument("--K", type=int, default=3)
     parser.add_argument("--num_layers", type=int, default=2)
@@ -114,8 +164,27 @@ def main():
     os.makedirs(args.out_dir, exist_ok=True)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     seeds = bb.SEEDS[:args.n_seeds]
-    print(f"[Info] Device: {device} | seeds: {len(seeds)} | arms: "
-          f"{args.gate_modes} x {args.desc_features}")
+
+    # ---- Resolve config source: HPO params JSON (arch + recipe + tuned gate) or CLI/generic ----
+    params_json = load_params_json(args.tame_params_json) if args.tame_params_json else None
+    if args.gate_modes is None:
+        args.gate_modes = ["anchored", "balance_off"] if params_json is not None else ["forced", "free"]
+    if params_json is not None:
+        R_hidden = int(params_json["hidden_channels"]); R_K = int(params_json["K"])
+        R_L = int(params_json["num_layers"]); R_pool = params_json.get("pool_type", "sum")
+        R_s2s = int(params_json.get("set2set_n_iter", 4))
+        fit_params = params_json  # carries lr / weight_decay / batch_size / encoder_lr_mult / label_smoothing
+        graph_recipe = bp.recipe_of(params_json)
+        print(f"[Info] Using HPO params from {args.tame_params_json}")
+    else:
+        R_hidden, R_K, R_L, R_pool, R_s2s = args.hidden, args.K, args.num_layers, args.pool, args.set2set_n_iter
+        fit_params = {"batch_size": args.batch_size, "lr": args.lr, "weight_decay": args.wd,
+                      "encoder_lr_mult": args.encoder_lr_mult}
+        graph_recipe = bp.recipe_of(None, lr=args.lr, wd=args.wd, batch_size=args.batch_size,
+                                    encoder_lr_mult=args.encoder_lr_mult, label_smoothing=args.label_smoothing)
+
+    print(f"[Info] Device: {device} | seeds: {len(seeds)} | arms: {args.gate_modes} x {args.desc_features} "
+          f"| backbone d{R_hidden}_K{R_K}_L{R_L}_{R_pool}")
 
     # ---- Data (identical split) ----
     print(f"[Info] Loading BACE ({args.splitter.title()} Split)...")
@@ -146,11 +215,11 @@ def main():
                 np.concatenate([rk_va, ecfp[1]], axis=1),
                 np.concatenate([rk_te, ecfp[2]], axis=1))
 
-    # ---- Optional pretrained encoder ----
+    # ---- Optional pretrained encoder (arch from the resolved backbone) ----
     enc_state, ckpt = None, None
     if args.ckpt_dir:
         ckpt = os.path.join(args.ckpt_dir,
-                            f"chebnet_pt_d{args.hidden}_K{args.K}_L{args.num_layers}_e{args.ckpt_epoch_tag}.pt")
+                            f"chebnet_pt_d{R_hidden}_K{R_K}_L{R_L}_e{args.ckpt_epoch_tag}.pt")
         if os.path.exists(ckpt):
             enc_state = bp.extract_encoder_state(ckpt)
             print(f"[Info] Loaded pretrained encoder: {ckpt}")
@@ -159,18 +228,13 @@ def main():
     else:
         print("[Warn] No --ckpt_dir; training encoder from scratch (weak-graph regime).")
 
-    params = {"batch_size": args.batch_size, "lr": args.lr, "weight_decay": args.wd,
-              "encoder_lr_mult": args.encoder_lr_mult}
-
     # ---- Reference ChebNet graph-only arm (matched checkpoint + recipe) ----
     # Only meaningful with a real checkpoint; run_graph_only reloads it, so skip when absent.
     run_ref = enc_state is not None
     if run_ref:
-        graph_bb = {"hidden": args.hidden, "K": args.K, "L": args.num_layers, "pool": args.pool,
-                    "set2set_n_iter": args.set2set_n_iter,
+        graph_bb = {"hidden": R_hidden, "K": R_K, "L": R_L, "pool": R_pool,
+                    "set2set_n_iter": R_s2s,
                     "ckpt_name": os.path.basename(ckpt), "ckpt_path": ckpt}
-        graph_recipe = bp.recipe_of(None, lr=args.lr, wd=args.wd, batch_size=args.batch_size,
-                                    encoder_lr_mult=args.encoder_lr_mult, label_smoothing=args.label_smoothing)
 
         def _graphs(sm):
             out = []
@@ -212,12 +276,12 @@ def main():
         }
         for gate_mode in args.gate_modes:
             arm = f"TAME[{gate_mode},{feat_kind}]"
-            config = build_config(args, gate_mode, int(d_tr.shape[1]), text_dim)
-            print(f"\n=== {arm}  (desc_dim={d_tr.shape[1]}, entropy_w={config.gate_entropy_weight}, "
-                  f"balance_w={config.gate_balance_weight}) ===")
+            config = build_config(args, gate_mode, int(d_tr.shape[1]), text_dim, params_json)
+            print(f"\n=== {arm}  (desc_dim={d_tr.shape[1]}, target={tuple(round(x,2) for x in config.gate_target)}, "
+                  f"entropy_w={config.gate_entropy_weight:.4g}, balance_w={config.gate_balance_weight:.4g}) ===")
             for seed in seeds:
                 test_probs, val_probs, history, (ent, gmin, gmeans) = bp.fit_full_model(
-                    "tame", config, params, enc_state, data, device,
+                    "tame", config, fit_params, enc_state, data, device,
                     max_epochs=args.max_epochs, patience=args.patience,
                     es_metric=args.es_metric, seed=seed)
                 roc, pr, f1 = bp._classification_metrics(y_test, test_probs)
@@ -257,13 +321,12 @@ def main():
         "split_sizes": {"train": len(train_smiles), "val": len(val_smiles), "test": len(test_smiles)},
         "seeds": [int(s) for s in seeds],
         "es_metric": args.es_metric, "max_epochs": args.max_epochs, "patience": args.patience,
-        "arch": {"hidden": args.hidden, "K": args.K, "num_layers": args.num_layers,
-                 "pool": args.pool, "set2set_n_iter": args.set2set_n_iter},
+        "tame_params_json": args.tame_params_json,
+        "arch": {"hidden": R_hidden, "K": R_K, "num_layers": R_L, "pool": R_pool, "set2set_n_iter": R_s2s},
         "checkpoint": {"dir": args.ckpt_dir, "epoch_tag": args.ckpt_epoch_tag,
                        "path": ckpt, "loaded_pretrained": bool(run_ref)},
-        "recipe": {"lr": args.lr, "weight_decay": args.wd, "batch_size": args.batch_size,
-                   "encoder_lr_mult": args.encoder_lr_mult, "label_smoothing": args.label_smoothing},
-        "gate_presets": {m: GATE_PRESETS[m] for m in args.gate_modes},
+        "recipe": graph_recipe,
+        "gate_config": {m: resolve_gate(m, params_json) for m in args.gate_modes},
         "desc_features": args.desc_features,
         "descriptor_dims": {"rdkit": int(rk_tr.shape[1]),
                             "rdkit_ecfp": int(rk_tr.shape[1] + np.asarray(train_dc.X).shape[1])},

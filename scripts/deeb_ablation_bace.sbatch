@@ -22,30 +22,23 @@ export OMP_NUM_THREADS=$SLURM_CPUS_PER_TASK
 ## Paths -- adjust to your cluster layout (env-var overridable) -------------
 REPO_DIR="${REPO_DIR:-/home/rschiller/Code/TAME-MPP/tame}"        # where this repo lives on the cluster
 CKPT_DIR="${CKPT_DIR:-/home/rschiller/Code/TAME-MPP/Rechnungen/checkpoints}"
-OUT_DIR="${OUT_DIR:-/home/rschiller/Code/TAME-MPP/Rechnungen/deeb_ablation/e01}"
+OUT_DIR="${OUT_DIR:-/home/rschiller/Code/TAME-MPP/Rechnungen/deeb_ablation/e02}"
+# Flat-TAME HPO best-params JSON. Drives arch (d64_K5_L3_sum), recipe AND the tuned graph-heavy
+# gate config (target=0.64, balance=0.0012, entropy=0.061) -- so the checkpoint chebnet_pt_d64_K5_L3_e25.pt
+# must exist in CKPT_DIR. Point this at your tame_hpo_v3 best-params file.
+TAME_PARAMS="${TAME_PARAMS:-/home/rschiller/Code/TAME-MPP/Rechnungen/hpo/tame_bace_best_params.json}"
+N_SEEDS="${N_SEEDS:-20}"
 mkdir -p "$OUT_DIR" logs
 
-## Graph backbone -- MUST match an existing chebnet_pt_d{H}_K{K}_L{L}_e25.pt --
-## Default = the best fusion backbone (d128_K3_L3, set2set); change to match your checkpoint.
-HIDDEN="${HIDDEN:-128}"
-K="${K:-3}"
-NUM_LAYERS="${NUM_LAYERS:-3}"
-POOL="${POOL:-set2set}"
-S2S="${S2S:-6}"
-N_SEEDS="${N_SEEDS:-20}"
-
-## Run the 2x2 factorial ----------------------------------------------------
+## anchored = as HPO-tuned (target prevents desc collapse); balance_off = same but balance_weight=0
+## (demonstrates the collapse the target prevents). desc: RDKit vs [RDKit || ECFP].
 python "$REPO_DIR/scripts/deeb_ablation_bace.py" \
         --out_dir "$OUT_DIR" \
         --ckpt_dir "$CKPT_DIR" \
         --ckpt_epoch_tag 25 \
-        --gate_modes forced free \
+        --tame_params_json "$TAME_PARAMS" \
+        --gate_modes anchored balance_off \
         --desc_features rdkit rdkit_ecfp \
-        --hidden "$HIDDEN" \
-        --K "$K" \
-        --num_layers "$NUM_LAYERS" \
-        --pool "$POOL" \
-        --set2set_n_iter "$S2S" \
         --n_seeds "$N_SEEDS" \
         --max_epochs 120 \
         --patience 20 \
