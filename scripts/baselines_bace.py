@@ -36,9 +36,14 @@ from contextlib import redirect_stdout, redirect_stderr
 
 import numpy as np
 import deepchem as dc
+from rdkit import Chem, RDLogger
+from rdkit.Chem import Descriptors
 from sklearn.metrics import roc_auc_score, average_precision_score, f1_score
 from sklearn.ensemble import RandomForestClassifier
 from sklearn.linear_model import LogisticRegression
+from sklearn.preprocessing import StandardScaler
+
+RDLogger.DisableLog("rdApp.*")
 
 project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if project_root not in sys.path:
@@ -87,6 +92,36 @@ def _blank_row(model, seed):
     return row
 
 
+# RDKit descriptor computation + train-median imputation, verbatim from
+# bace_preliminary_results.py so rf_rdkit/logreg_rdkit see EXACTLY the features DEEB consumes.
+def compute_rdkit_descriptors(smiles_list):
+    desc_names = [name for name, _ in Descriptors.descList]
+    rows = []
+    for smi in smiles_list:
+        mol = Chem.MolFromSmiles(smi)
+        if mol is None:
+            rows.append(np.full(len(desc_names), np.nan))
+            continue
+        all_desc = Descriptors.CalcMolDescriptors(mol)
+        rows.append([all_desc.get(name, np.nan) for name in desc_names])
+    return np.asarray(rows, dtype=np.float32)
+
+
+def impute_with_train_median(train_X, valid_X, test_X):
+    med = np.nanmedian(np.asarray(train_X, dtype=np.float32), axis=0)
+    med = np.where(np.isfinite(med), med, 0.0).astype(np.float32)
+
+    def _imp(X):
+        X = np.asarray(X, dtype=np.float32)
+        mask = ~np.isfinite(X)
+        if mask.any():
+            X = X.copy()
+            X[mask] = np.take(med, np.where(mask)[1])
+        return X
+
+    return _imp(train_X), _imp(valid_X), _imp(test_X)
+
+
 # ---------------------------------------------------------------------------
 # BACE loading (identical args to bace_preliminary_results.py -> identical split)
 # ---------------------------------------------------------------------------
@@ -120,22 +155,35 @@ def _proba_pos(clf, X):
     return proba[:, pos_col].astype(np.float32)
 
 
-def run_classical(model_name, train_dc, valid_dc, test_dc, seeds):
-    X_train, y_train = np.asarray(train_dc.X, np.float32), train_dc.y.reshape(-1).astype(np.float32)
-    X_val, y_val = np.asarray(valid_dc.X, np.float32), valid_dc.y.reshape(-1).astype(np.float32)
-    X_test, y_test = np.asarray(test_dc.X, np.float32), test_dc.y.reshape(-1).astype(np.float32)
-    print(f"\n=== {model_name} on ECFP (dim={X_train.shape[1]}) ===")
+# model_name -> (algorithm, feature source, standardize-features?)
+CLASSICAL_SPECS = {
+    "rf_ecfp":      ("rf",     "ecfp",  False),
+    "logreg_ecfp":  ("logreg", "ecfp",  False),  # ECFP is sparse-binary; no scaling needed
+    "rf_rdkit":     ("rf",     "rdkit", False),   # trees are scale-invariant
+    "logreg_rdkit": ("logreg", "rdkit", True),    # continuous descriptors -> standardize for a fair linear read
+}
+
+
+def _make_classifier(algo, seed):
+    if algo == "rf":
+        return RandomForestClassifier(n_estimators=500, n_jobs=-1, random_state=int(seed))
+    if algo == "logreg":
+        return LogisticRegression(max_iter=2000, C=1.0, random_state=int(seed))
+    raise ValueError(f"Unknown algorithm: {algo}")
+
+
+def run_classical(model_name, algo, feats, ys, seeds, standardize):
+    """Fit `algo` on precomputed (train, val, test) feature matrices; return per-seed metric rows."""
+    X_train, X_val, X_test = feats
+    y_train, y_val, y_test = ys
+    if standardize:
+        scaler = StandardScaler().fit(X_train)
+        X_train, X_val, X_test = (scaler.transform(X_train), scaler.transform(X_val), scaler.transform(X_test))
+    print(f"\n=== {model_name} (dim={X_train.shape[1]}) ===")
 
     rows = []
     for seed in seeds:
-        if model_name == "rf_ecfp":
-            clf = RandomForestClassifier(n_estimators=500, n_jobs=-1, random_state=int(seed))
-        elif model_name == "logreg_ecfp":
-            # ECFP is high-dim sparse-binary; L2 logistic regression is the standard linear baseline.
-            clf = LogisticRegression(max_iter=2000, C=1.0, random_state=int(seed))
-        else:
-            raise ValueError(f"Unknown classical model: {model_name}")
-
+        clf = _make_classifier(algo, seed)
         clf.fit(X_train, y_train.astype(int))
         roc, pr, f1 = _classification_metrics(y_test, _proba_pos(clf, X_test))
         val_roc, _, _ = _classification_metrics(y_val, _proba_pos(clf, X_val))
@@ -309,8 +357,8 @@ def main():
     parser.add_argument("--out_dir", type=str, default="benchmarking/results")
     parser.add_argument("--splitter", type=str, choices=["random", "scaffold"], default="scaffold")
     parser.add_argument("--models", nargs="+",
-                        choices=["rf_ecfp", "logreg_ecfp", "pyg_cheb"],
-                        default=["rf_ecfp", "logreg_ecfp", "pyg_cheb"])
+                        choices=["rf_ecfp", "logreg_ecfp", "rf_rdkit", "logreg_rdkit", "pyg_cheb"],
+                        default=["rf_ecfp", "logreg_ecfp", "rf_rdkit", "logreg_rdkit", "pyg_cheb"])
     parser.add_argument("--n_seeds", type=int, default=len(SEEDS),
                         help="How many of the shared 100 seeds to run (default all).")
     # PyG ChebConv architecture / recipe (defaults mirror the 'ChebNet (generic)' baseline).
@@ -334,10 +382,32 @@ def main():
     train_dc, valid_dc, test_dc = load_bace(args.splitter)
     print(f"  train={len(train_dc)} val={len(valid_dc)} test={len(test_dc)}")
 
+    ys = (train_dc.y.reshape(-1).astype(np.float32),
+          valid_dc.y.reshape(-1).astype(np.float32),
+          test_dc.y.reshape(-1).astype(np.float32))
+
+    # Lazily build and cache each feature source (rdkit is shared by rf_rdkit + logreg_rdkit).
+    _feat_cache = {}
+
+    def get_feats(source):
+        if source not in _feat_cache:
+            if source == "ecfp":
+                _feat_cache[source] = (np.asarray(train_dc.X, np.float32),
+                                       np.asarray(valid_dc.X, np.float32),
+                                       np.asarray(test_dc.X, np.float32))
+            elif source == "rdkit":
+                print("[Info] Computing RDKit descriptors (same features DEEB consumes)...")
+                raw = (compute_rdkit_descriptors(list(train_dc.ids)),
+                       compute_rdkit_descriptors(list(valid_dc.ids)),
+                       compute_rdkit_descriptors(list(test_dc.ids)))
+                _feat_cache[source] = impute_with_train_median(*raw)
+        return _feat_cache[source]
+
     rows = []
     for model_name in args.models:
-        if model_name in ("rf_ecfp", "logreg_ecfp"):
-            rows.extend(run_classical(model_name, train_dc, valid_dc, test_dc, seeds))
+        if model_name in CLASSICAL_SPECS:
+            algo, source, standardize = CLASSICAL_SPECS[model_name]
+            rows.extend(run_classical(model_name, algo, get_feats(source), ys, seeds, standardize))
         elif model_name == "pyg_cheb":
             rows.extend(run_pyg_cheb(train_dc, valid_dc, test_dc, seeds, args))
 
