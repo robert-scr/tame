@@ -55,7 +55,3 @@ cp .env.example .env
 ```
 
 Authentication supports both API key and Azure CLI (`DefaultAzureCredential`). Not needed for the cached datasets.
-
-## Contact
-
-Robert Peter Schiller — rob.schiller@outlook.de
