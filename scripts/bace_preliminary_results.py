@@ -39,6 +39,7 @@ from contextlib import redirect_stdout, redirect_stderr
 import numpy as np
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 import deepchem as dc
 from rdkit import Chem, RDLogger
 from rdkit.Chem import Descriptors
@@ -176,6 +177,38 @@ def build_tame_config(params, text_dim, desc_dim):
     )
 
 
+def build_tame_config_zeroed(params, text_dim, desc_dim):
+    """TAME with the router hard-forced to graph-only (text/desc gates exactly 0).
+
+    Unlike the bare-ChebClassifier "TAME (graph-only)" control, this keeps the full
+    architecture (encoder, projections, router, head) intact -- only the gate output
+    is overridden, so text_proj/desc_proj still run but contribute nothing to fused_emb.
+    gate_balance_weight/gate_entropy_weight are zeroed since both regularizers become
+    dead/meaningless once the gate is hard-forced and non-differentiable w.r.t. the router.
+    """
+    config = build_tame_config(params, text_dim, desc_dim)
+    config.force_graph_only = True
+    config.gate_balance_weight = 0.0
+    config.gate_entropy_weight = 0.0
+    return config
+
+
+def build_tame_config_scalar(params, text_dim, desc_dim):
+    """TAME with a scalar (one value per expert per molecule) gate instead of the
+    default per-hidden-dimension gate."""
+    config = build_tame_config(params, text_dim, desc_dim)
+    config.gate_mode = "scalar"
+    return config
+
+
+def build_fusion_config_scalar(params, text_dim):
+    """TAME-Fusion with a scalar (one value per expert per molecule) gate instead of
+    the default per-hidden-dimension gate."""
+    config = build_fusion_config(params, text_dim)
+    config.gate_mode = "scalar"
+    return config
+
+
 def build_fusion_config(params, text_dim):
     pool = params.get("pool_type", "sum")
     return TAMEFusionPredictorConfig(
@@ -265,6 +298,52 @@ class ChebClassifier(nn.Module):
         return self.head(graph).view(-1)
 
 
+class PyGChebClassifier(nn.Module):
+    """PyG ChebConv baseline: same architecture as ChebClassifier but using
+    torch_geometric.nn.ChebConv instead of the in-house ChebLayer.
+
+    Not used by this script's ``main()`` directly -- torch-geometric isn't available
+    on the cluster this benchmark normally runs on. Imported instead by
+    ``scripts/pyg_chebnet_hpo_bace.py``, which runs the PyG baseline (HPO + 100 seeds)
+    standalone on a machine that has torch-geometric installed and writes a CSV with
+    the same schema, which the plotting notebook then concatenates in.
+    """
+
+    def __init__(self, in_channels, hidden_channels, K, num_layers, pool, set2set_n_iter):
+        super().__init__()
+        from torch_geometric.nn import ChebConv
+
+        self.convs = nn.ModuleList()
+        for i in range(num_layers):
+            in_c = in_channels if i == 0 else hidden_channels
+            self.convs.append(ChebConv(in_c, hidden_channels, K=K))
+
+        self.dropout = 0.1
+        self.register_buffer("lambda_max", torch.tensor([2.0]))
+
+        if pool == "set2set":
+            self.pool = create_pooling("set2set", input_dim=hidden_channels, n_iters=set2set_n_iter)
+        else:
+            self.pool = create_pooling(pool, input_dim=hidden_channels)
+        head_in = int(getattr(self.pool, "output_dim", hidden_channels))
+        hidden_head = max(head_in // 2, 1)
+        self.head = nn.Sequential(
+            nn.Linear(head_in, hidden_head),
+            nn.ReLU(),
+            nn.Dropout(0.3),
+            nn.Linear(hidden_head, 1),
+        )
+
+    def forward(self, x, edge_index, edge_weight, batch):
+        h = x
+        for conv in self.convs:
+            h = conv(h, edge_index, edge_weight, batch=batch, lambda_max=self.lambda_max)
+            h = F.relu(h)
+            h = F.dropout(h, p=self.dropout, training=self.training)
+        graph = self.pool(h, batch)
+        return self.head(graph).view(-1)
+
+
 def graphs_to_tensors(bg, device):
     x = torch.from_numpy(bg.X.astype(np.float32)).to(device)
     edge_index = torch.from_numpy(bg.edge_index.astype(np.int64)).to(device)
@@ -326,6 +405,67 @@ def run_graph_only(bb, recipe, graphs, ys, device, *, max_epochs, patience, es_m
         [{"params": enc_params, "lr": recipe["lr"] * recipe["encoder_lr_mult"]},
          {"params": other_params, "lr": recipe["lr"]}],
         weight_decay=recipe["weight_decay"],
+    )
+    criterion = nn.BCEWithLogitsLoss()
+    ls = recipe["label_smoothing"]
+    rng = np.random.default_rng(seed)
+    train_idx = np.arange(len(train_graphs))
+
+    best_metric = float("-inf") if es_metric == "val_auc" else float("inf")
+    best_state = copy.deepcopy(model.state_dict())
+    best_epoch = 0
+    no_improve = 0
+
+    for epoch in range(1, max_epochs + 1):
+        model.train()
+        for bg, yb in _graph_batches(train_graphs, y_train, train_idx, recipe["batch_size"], True, rng):
+            x, ei, ew, b = graphs_to_tensors(bg, device)
+            yt = torch.from_numpy(yb).to(device)
+            if ls > 0.0:
+                yt = yt * (1.0 - ls) + 0.5 * ls
+            optimizer.zero_grad(set_to_none=True)
+            loss = criterion(model(x, ei, ew, b), yt)
+            loss.backward()
+            optimizer.step()
+
+        val_probs = _graph_predict(model, val_graphs, device)
+        val_roc, _, _ = _classification_metrics(y_val, val_probs)
+        obs = np.isfinite(y_val) & np.isfinite(val_probs)
+        val_loss = float(nn.functional.binary_cross_entropy(
+            torch.from_numpy(val_probs[obs].clip(1e-7, 1 - 1e-7)),
+            torch.from_numpy(y_val[obs]),
+        )) if obs.any() else float("inf")
+
+        metric = val_roc if es_metric == "val_auc" else val_loss
+        is_better = (metric > best_metric) if es_metric == "val_auc" else (metric < best_metric)
+        if np.isfinite(metric) and is_better:
+            best_metric = metric
+            best_state = copy.deepcopy(model.state_dict())
+            best_epoch = epoch
+            no_improve = 0
+        else:
+            no_improve += 1
+            if no_improve >= patience:
+                break
+
+    model.load_state_dict(best_state)
+    test_probs = _graph_predict(model, test_graphs, device)
+    val_probs = _graph_predict(model, val_graphs, device)
+    return test_probs, val_probs, best_epoch
+
+
+def run_pyg_graph_only(bb, recipe, graphs, ys, device, *, max_epochs, patience, es_metric, seed):
+    """Train PyG ChebConv (from scratch) on BACE with ``recipe``; return (test, val) probs, epoch."""
+    set_seed(seed)
+    train_graphs, val_graphs, test_graphs = graphs
+    y_train, y_val, _ = ys
+
+    in_channels = next(int(g.X.shape[1]) for g in train_graphs if g is not None)
+    model = PyGChebClassifier(in_channels, bb["hidden"], bb["K"], bb["L"], bb["pool"],
+                              bb["set2set_n_iter"]).to(device)
+
+    optimizer = torch.optim.AdamW(
+        model.parameters(), lr=recipe["lr"], weight_decay=recipe["weight_decay"],
     )
     criterion = nn.BCEWithLogitsLoss()
     ls = recipe["label_smoothing"]
@@ -523,6 +663,12 @@ def main():
     parser.add_argument("--cheb_lr", type=float, default=1e-3, help="Generic baseline learning rate")
     parser.add_argument("--cheb_wd", type=float, default=1e-4, help="Generic baseline weight decay")
     parser.add_argument("--cheb_batch_size", type=int, default=64, help="Generic baseline batch size")
+    parser.add_argument("--zeroed_ablation", action="store_true",
+                        help="Also run TAME with the router hard-forced to graph-only "
+                             "(full architecture, text/desc gates exactly 0)")
+    parser.add_argument("--scalar_gate_ablation", action="store_true",
+                        help="Also run TAME and TAME-Fusion with a scalar (per-molecule) "
+                             "gate instead of the per-hidden-dimension gate")
     parser.add_argument("--gate_sweep", action="store_true", help="Also run the TAME gate-target sweep")
     parser.add_argument("--sweep_seeds", type=int, default=5, help="Number of seeds for the gate sweep")
     parser.add_argument("--gate_targets_list", type=str, default=None,
@@ -656,6 +802,20 @@ def main():
         ("TAME-Fusion", "fusion", fusion_params, fusion_bb,
          build_fusion_config(fusion_params, text_dim)),
     ]
+    if args.zeroed_ablation:
+        full_models.append(
+            ("TAME (zeroed)", "tame", tame_params, tame_bb,
+             build_tame_config_zeroed(tame_params, text_dim, desc_dim))
+        )
+    if args.scalar_gate_ablation:
+        full_models.append(
+            ("TAME (scalar gate)", "tame", tame_params, tame_bb,
+             build_tame_config_scalar(tame_params, text_dim, desc_dim))
+        )
+        full_models.append(
+            ("TAME-Fusion (scalar gate)", "fusion", fusion_params, fusion_bb,
+             build_fusion_config_scalar(fusion_params, text_dim))
+        )
     for label, kind, params, bb, config in full_models:
         print(f"\n=== {label} ===")
         print(f"    config: {asdict(config)}")
@@ -706,6 +866,14 @@ def main():
                         "config": asdict(build_fusion_config(fusion_params, text_dim))},
         "f1_threshold": 0.5,
     }
+    if args.zeroed_ablation:
+        meta["tame_zeroed"] = {"checkpoint": tame_bb["ckpt_name"], "recipe": tame_recipe,
+                               "config": asdict(build_tame_config_zeroed(tame_params, text_dim, desc_dim))}
+    if args.scalar_gate_ablation:
+        meta["tame_scalar_gate"] = {"checkpoint": tame_bb["ckpt_name"], "recipe": tame_recipe,
+                                    "config": asdict(build_tame_config_scalar(tame_params, text_dim, desc_dim))}
+        meta["tame_fusion_scalar_gate"] = {"checkpoint": fusion_bb["ckpt_name"], "recipe": fusion_recipe,
+                                           "config": asdict(build_fusion_config_scalar(fusion_params, text_dim))}
     meta_path = os.path.join(args.out_dir, "bace_preliminary_meta.json")
     with open(meta_path, "w") as f:
         json.dump(meta, f, indent=2)
