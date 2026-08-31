@@ -4,6 +4,9 @@ ref_literature/
 # Internal docs
 docs/
 
+# Internal benchmarking notebooks/results (not part of the public reproduction path)
+benchmarking/
+
 # AI assistant config / context
 CLAUDE.md
 .claude/
