@@ -23,7 +23,7 @@ prompts/         CoT text generation and prompt building
 utils/           Molecular graph construction, embedding cache, similarity
 data/            BACE loader, descriptor cache
 scripts/         Training / HPO / pretraining drivers
-benchmarking/    Self-contained notebooks per dataset (BACE, ESOL, QM8, Tox21)
+notebooks/       Minimal, self-contained reproductions of paper figures
 configs/hpo/     HPO best-params consumed by the benchmark driver
 cache/           Pre-computed CoT texts + embeddings + descriptors (runs offline)
 ```
@@ -39,13 +39,15 @@ uv run python scripts/bace_preliminary_results.py \
     --tame_params_json configs/hpo/tame_bace/best_params.json \
     --fusion_params_json configs/hpo/tame_fusion_bace/best_params.json
 
-# Or explore a dataset notebook end-to-end
-uv run jupyter notebook benchmarking/seg_bace_benchmark.ipynb
+# Or reproduce a paper figure directly from precomputed data (no training/API calls)
+uv run jupyter notebook notebooks/preliminary_benchmark.ipynb
 ```
 
-The `benchmarking/` notebooks are the best entry point — each is a self-contained example for one dataset (BACE / ESOL / QM8 / Tox21). Pre-computed CoT texts and embeddings live in `cache/`, so they run without API calls.
+The `notebooks/` directory is the best entry point — each notebook is a minimal, self-contained reproduction of a paper figure, loading small precomputed CSV/NPZ summaries (no trained-checkpoint bundles, no torch/model imports needed):
 
-> **Note:** the flat-TAME HPO best-params JSON (`configs/hpo/tame_bace/best_params.json`) is not yet included — supply it to run the flat model. Only `configs/hpo/tame_fusion_bace/` ships here.
+- `preliminary_benchmark.ipynb` — PyG ChebNet vs TAME/TAME-Fusion graph-only ablations vs full models, 100 seeds, BACE scaffold split.
+- `training_dynamics.ipynb` — TAME MoE gate contributions per epoch, and per-molecule gate weight distributions on the validation set.
+- `pubready_analysis.ipynb` — CKA, SVD/rank, and Tanimoto/CosSim vs. prediction-shift correlation plots.
 
 ## Azure OpenAI setup (only to generate *new* CoT texts / embeddings)
 
@@ -55,3 +57,7 @@ cp .env.example .env
 ```
 
 Authentication supports both API key and Azure CLI (`DefaultAzureCredential`). Not needed for the cached datasets.
+
+## License
+
+MIT — see [LICENSE](LICENSE).
