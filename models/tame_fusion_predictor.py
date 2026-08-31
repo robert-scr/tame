@@ -79,19 +79,24 @@ class SEGDescriptorElementWiseMoE(nn.Module):
         router_dropout: float = 0.1,
         head_hidden_dim: int = 128,
         head_dropout: float = 0.1,
+        gate_mode: str = "elementwise",
     ) -> None:
         super().__init__()
+        if gate_mode not in ("elementwise", "scalar"):
+            raise ValueError(f"gate_mode must be 'elementwise' or 'scalar', got {gate_mode!r}")
         self.hidden_dim = int(hidden_dim)
+        self.gate_mode = gate_mode
 
         self.seg_proj = ModalityProjectionMLP(seg_dim, hidden_dim, dropout)
         self.desc_proj = DescriptorProjectionMLP(desc_dim, hidden_dim, dropout)
 
         router_in_dim = hidden_dim * 2
+        router_out_dim = 2 if gate_mode == "scalar" else router_in_dim
         self.router = nn.Sequential(
             nn.Linear(router_in_dim, router_in_dim),
             nn.GELU(),
             nn.Dropout(router_dropout),
-            nn.Linear(router_in_dim, router_in_dim),
+            nn.Linear(router_in_dim, router_out_dim),
         )
 
         self.pred_head = nn.Sequential(
@@ -113,8 +118,12 @@ class SEGDescriptorElementWiseMoE(nn.Module):
         router_out = self.router(concat)
 
         bsz = router_out.shape[0]
-        gates = router_out.view(bsz, self.hidden_dim, 2)
-        gates = torch.softmax(gates, dim=-1)
+        if self.gate_mode == "scalar":
+            gates_scalar = torch.softmax(router_out, dim=-1)  # (B, 2)
+            gates = gates_scalar.unsqueeze(1).expand(-1, self.hidden_dim, -1)  # (B, H, 2)
+        else:
+            gates = router_out.view(bsz, self.hidden_dim, 2)
+            gates = torch.softmax(gates, dim=-1)
 
         g_s = gates[:, :, 0]
         g_d = gates[:, :, 1]
@@ -134,12 +143,15 @@ class SEGDescriptorElementWiseMoE(nn.Module):
         import math
         final = self.router[-1]
         nn.init.normal_(final.weight, std=0.01)
-        H = self.hidden_dim
         eps = 1e-6
         p_s = max(min(float(gate_target), 1.0 - eps), eps)
-        bias = torch.zeros(H * 2)
-        bias[0::2] = math.log(p_s)
-        bias[1::2] = math.log(1.0 - p_s)
+        if self.gate_mode == "scalar":
+            bias = torch.tensor([math.log(p_s), math.log(1.0 - p_s)])
+        else:
+            H = self.hidden_dim
+            bias = torch.zeros(H * 2)
+            bias[0::2] = math.log(p_s)
+            bias[1::2] = math.log(1.0 - p_s)
         final.bias.data.copy_(bias)
 
 
@@ -187,6 +199,8 @@ class TAMEFusionPredictorConfig(BasePredictorConfig):
     gate_target: float = 0.5
     # Descriptor-modality dropout probability during training
     desc_modality_dropout: float = 0.0
+    # "elementwise" (default, per-hidden-dim gate) or "scalar" (one gate value per expert per molecule)
+    gate_mode: str = "elementwise"
 
     # Training regularization
     label_smoothing: float = 0.0
@@ -652,6 +666,7 @@ class TAMEFusionPredictor(BasePredictor):
             router_dropout=float(self.config.router_dropout),
             head_hidden_dim=int(self.config.head_hidden_dim),
             head_dropout=float(self.config.head_dropout),
+            gate_mode=str(self.config.gate_mode),
         ).to(self.device)
         self._moe_module._init_router_at_target(self.config.gate_target)
 

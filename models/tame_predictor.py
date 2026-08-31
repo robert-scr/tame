@@ -80,20 +80,27 @@ class TriModalElementWiseMoE(nn.Module):
         router_dropout: float = 0.1,
         head_hidden_dim: int = 128,
         head_dropout: float = 0.1,
+        gate_mode: str = "elementwise",
+        force_graph_only: bool = False,
     ) -> None:
         super().__init__()
+        if gate_mode not in ("elementwise", "scalar"):
+            raise ValueError(f"gate_mode must be 'elementwise' or 'scalar', got {gate_mode!r}")
         self.hidden_dim = int(hidden_dim)
+        self.gate_mode = gate_mode
+        self.force_graph_only = bool(force_graph_only)
 
         self.graph_proj = ModalityProjectionMLP(graph_dim, hidden_dim, dropout)
         self.text_proj = ModalityProjectionMLP(text_dim, hidden_dim, dropout)
         self.desc_proj = DescriptorProjectionMLP(desc_dim, hidden_dim, dropout)
 
         router_in_dim = hidden_dim * 3
+        router_out_dim = 3 if gate_mode == "scalar" else router_in_dim
         self.router = nn.Sequential(
             nn.Linear(router_in_dim, router_in_dim),
             nn.GELU(),
             nn.Dropout(router_dropout),
-            nn.Linear(router_in_dim, router_in_dim),
+            nn.Linear(router_in_dim, router_out_dim),
         )
 
         self.pred_head = nn.Sequential(
@@ -117,8 +124,16 @@ class TriModalElementWiseMoE(nn.Module):
         router_out = self.router(concat)
 
         bsz = router_out.shape[0]
-        gates = router_out.view(bsz, self.hidden_dim, 3)
-        gates = torch.softmax(gates, dim=-1)
+        if self.gate_mode == "scalar":
+            gates_scalar = torch.softmax(router_out, dim=-1)  # (B, 3)
+            gates = gates_scalar.unsqueeze(1).expand(-1, self.hidden_dim, -1)  # (B, H, 3)
+        else:
+            gates = router_out.view(bsz, self.hidden_dim, 3)
+            gates = torch.softmax(gates, dim=-1)
+
+        if self.force_graph_only:
+            gates = torch.zeros_like(gates)
+            gates[..., 0] = 1.0
 
         g_g = gates[:, :, 0]
         g_t = gates[:, :, 1]
@@ -140,15 +155,18 @@ class TriModalElementWiseMoE(nn.Module):
         import math
         final = self.router[-1]
         nn.init.normal_(final.weight, std=0.01)
-        H = self.hidden_dim
         eps = 1e-6
         p = [max(float(gate_target[i]), eps) for i in range(3)]
         s = sum(p)
         p = [x / s for x in p]
-        bias = torch.zeros(H * 3)
-        bias[0::3] = math.log(p[0])
-        bias[1::3] = math.log(p[1])
-        bias[2::3] = math.log(p[2])
+        if self.gate_mode == "scalar":
+            bias = torch.tensor([math.log(p[0]), math.log(p[1]), math.log(p[2])])
+        else:
+            H = self.hidden_dim
+            bias = torch.zeros(H * 3)
+            bias[0::3] = math.log(p[0])
+            bias[1::3] = math.log(p[1])
+            bias[2::3] = math.log(p[2])
         final.bias.data.copy_(bias)
 
 
@@ -189,6 +207,10 @@ class TAMEPredictorConfig(BasePredictorConfig):
     # Descriptor-modality dropout probability during training
     desc_modality_dropout: float = 0.0
     gate_target: Tuple[float, float, float] = (1.0/3.0, 1.0/3.0, 1.0/3.0)
+    # "elementwise" (default, per-hidden-dim gate) or "scalar" (one gate value per expert per molecule)
+    gate_mode: str = "elementwise"
+    # Ablation: hard-force the gate to (graph=1, text=0, desc=0) regardless of router output
+    force_graph_only: bool = False
 
     # Training regularization
     label_smoothing: float = 0.0
@@ -623,6 +645,8 @@ class TAMEPredictor(BasePredictor):
             router_dropout=float(self.config.router_dropout),
             head_hidden_dim=int(self.config.head_hidden_dim),
             head_dropout=float(self.config.head_dropout),
+            gate_mode=str(self.config.gate_mode),
+            force_graph_only=bool(self.config.force_graph_only),
         ).to(self.device)
         self._moe_module._init_router_at_target(self.config.gate_target)
 
